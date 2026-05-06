@@ -223,7 +223,7 @@ describe('handleModelNotAvailable', () => {
     const choices = mockSelect.mock.calls[0][0].choices;
     const values = choices.map((c: { value: string }) => c.value);
     expect(values).toContain('auto');
-    expect(values).toContain('composer-1.5');
+    expect(values).toContain('composer-2');
     expect(values).not.toContain('sonnet-4.6');
   });
 

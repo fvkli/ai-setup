@@ -10,7 +10,12 @@ const { mockSelect, mockConfirm, mockWriteConfigFile, mockInput } = vi.hoisted((
 vi.mock('@inquirer/select', () => ({ default: mockSelect }));
 vi.mock('@inquirer/confirm', () => ({ default: mockConfirm }));
 vi.mock('@inquirer/input', () => ({ default: mockInput }));
-vi.mock('../../llm/cursor-acp.js', () => ({ isCursorAgentAvailable: () => false }));
+vi.mock('../../llm/cursor-acp.js', () => ({
+  isCursorAgentAvailable: () => false,
+  isCursorLoggedIn: () => false,
+  listCursorModels: () => Promise.resolve([]),
+  ensureBashShim: () => null,
+}));
 vi.mock('../../llm/claude-cli.js', () => ({ isClaudeCliAvailable: () => false }));
 vi.mock('../../llm/config.js', () => ({
   writeConfigFile: (...args: unknown[]) => mockWriteConfigFile(...args),

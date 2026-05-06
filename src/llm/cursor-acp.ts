@@ -1,5 +1,7 @@
 import { spawn, execSync, execFileSync, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import type {
   LLMProvider,
   LLMCallOptions,
@@ -10,7 +12,7 @@ import type {
 import { parseSeatBasedError, isRateLimitError } from './seat-based-errors.js';
 import { trackUsage } from './usage.js';
 import { estimateTokens } from './utils.js';
-import { quoteForWindows } from '../utils/windows.js';
+import { quoteForWindows, bashPath } from '../utils/windows.js';
 import { withCaliberSubprocessEnv } from '../lib/subprocess-sentinel.js';
 
 const IS_WINDOWS = process.platform === 'win32';
@@ -18,16 +20,40 @@ const IS_WINDOWS = process.platform === 'win32';
 let _agentBin: string | null = null;
 
 /**
+ * Known installation paths for the Cursor Agent CLI binary, in probe order.
+ * On Windows the installer places it at %LOCALAPPDATA%\cursor-agent\agent.cmd.
+ * On macOS/Linux it may be at ~/.local/bin/agent or /usr/local/bin/agent.
+ */
+function candidateAgentPaths(): string[] {
+  if (IS_WINDOWS) {
+    const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local');
+    return [path.join(localAppData, 'cursor-agent', 'agent.cmd')];
+  }
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+  return [`${home}/.local/bin/agent`, '/usr/local/bin/agent', '/opt/homebrew/bin/agent'].filter(
+    Boolean,
+  );
+}
+
+/**
  * Resolve the Cursor `agent` binary to an absolute path so it works even when
- * $PATH is stripped (e.g. Claude Code hook subprocesses on macOS).
+ * $PATH is stripped (e.g. Claude Code hook subprocesses on macOS) or the
+ * well-known install directory isn't on PATH (common on Windows).
  * Result is cached after first call.
  */
 function resolveAgentBin(): string {
   if (_agentBin !== null) return _agentBin;
+
+  // 1. Try PATH first
   try {
     const whichCmd = IS_WINDOWS ? 'where agent' : 'which agent';
     const out = execSync(whichCmd, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    const p = out.split('\n')[0].trim();
+    const lines = out
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    // On Windows, prefer .cmd/.exe/.bat over extensionless files (e.g. bash shims)
+    const p = IS_WINDOWS ? (lines.find((l) => /\.(cmd|exe|bat)$/i.test(l)) ?? lines[0]) : lines[0];
     if (p) {
       _agentBin = p;
       return _agentBin;
@@ -35,6 +61,18 @@ function resolveAgentBin(): string {
   } catch {
     // not on PATH
   }
+
+  // 2. Probe well-known install locations
+  for (const candidate of candidateAgentPaths()) {
+    try {
+      fs.accessSync(candidate, IS_WINDOWS ? fs.constants.F_OK : fs.constants.X_OK);
+      _agentBin = candidate;
+      return _agentBin;
+    } catch {
+      // not found — try next candidate
+    }
+  }
+
   _agentBin = 'agent';
   return _agentBin;
 }
@@ -62,13 +100,17 @@ export class CursorAcpProvider implements LLMProvider {
   private warmModel: string | null = null;
 
   constructor(config: LLMConfig) {
-    this.defaultModel = config.model || 'sonnet-4.6';
+    this.defaultModel = config.model || 'auto';
     this.cursorApiKey = process.env.CURSOR_API_KEY ?? process.env.CURSOR_AUTH_TOKEN;
     const envTimeout = process.env.CALIBER_CURSOR_TIMEOUT_MS;
     this.timeoutMs = envTimeout ? parseInt(envTimeout, 10) : DEFAULT_TIMEOUT_MS;
     if (!Number.isFinite(this.timeoutMs) || this.timeoutMs < 1000) {
       this.timeoutMs = DEFAULT_TIMEOUT_MS;
     }
+  }
+
+  async listModels(): Promise<string[]> {
+    return listCursorModels();
   }
 
   async call(options: LLMCallOptions): Promise<string> {
@@ -410,6 +452,65 @@ export class CursorAcpProvider implements LLMProvider {
   }
 }
 
+let _cachedModels: string[] | null = null;
+
+/**
+ * Parse available models from the Cursor agent CLI error output.
+ * The CLI responds to invalid model names with:
+ *   "Cannot use this model: X. Available models: a, b, c"
+ */
+export function parseCursorModelList(output: string): string[] {
+  const match = output.match(/Available models:\s*(.+)/i);
+  if (!match) return [];
+  return match[1]
+    .split(',')
+    .map((m) => m.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Query available models from the Cursor Agent CLI.
+ * Sends an invalid model name to trigger the error listing.
+ * Result is cached for the process lifetime.
+ */
+export async function listCursorModels(): Promise<string[]> {
+  if (_cachedModels !== null) return _cachedModels;
+  try {
+    const bin = resolveAgentBin();
+    const args = ['--print', '--trust', '--workspace', os.tmpdir(), '--model', '__caliber_probe__'];
+    const cmd = IS_WINDOWS
+      ? `${quoteForWindows(bin)} ${args.map(quoteForWindows).join(' ')}`
+      : undefined;
+    const result = IS_WINDOWS
+      ? execSync(cmd!, {
+          input: '.',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 15000,
+          env: withCaliberSubprocessEnv(process.env),
+        })
+      : execFileSync(bin, args, {
+          input: '.',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 15000,
+          env: withCaliberSubprocessEnv(process.env),
+        });
+    _cachedModels = parseCursorModelList(result.toString());
+  } catch (err: unknown) {
+    const parts: string[] = [];
+    if (err instanceof Error) parts.push(err.message);
+    const e = err as { stdout?: Buffer; stderr?: Buffer };
+    if (e.stdout) parts.push(e.stdout.toString());
+    if (e.stderr) parts.push(e.stderr.toString());
+    _cachedModels = parseCursorModelList(parts.join('\n'));
+  }
+  return _cachedModels;
+}
+
+/** Reset cached model list — used in tests. */
+export function resetCursorModelCache(): void {
+  _cachedModels = null;
+}
+
 /** Check if Cursor agent CLI is available. */
 export function isCursorAgentAvailable(): boolean {
   // resolveAgentBin() returns an absolute path when `which agent` succeeded.
@@ -422,17 +523,69 @@ export function isCursorAgentAvailable(): boolean {
   }
 }
 
-/** Check if user is logged in to Cursor agent. */
+let cachedLoggedIn: boolean | null = null;
+
+/** Check if user is logged in to Cursor agent. Result is cached for the process lifetime. */
 export function isCursorLoggedIn(): boolean {
+  if (cachedLoggedIn !== null) return cachedLoggedIn;
   try {
-    const result = execFileSync(resolveAgentBin(), ['status'], {
-      input: '',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 5000,
-      env: withCaliberSubprocessEnv({ ...process.env }),
-    });
-    return !result.toString().toLowerCase().includes('not logged in');
+    const bin = resolveAgentBin();
+    const result = IS_WINDOWS
+      ? execSync(`${quoteForWindows(bin)} status`, {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 5000,
+          env: withCaliberSubprocessEnv(process.env),
+        })
+      : execFileSync(bin, ['status'], {
+          input: '',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 5000,
+          env: withCaliberSubprocessEnv(process.env),
+        });
+    cachedLoggedIn = !result.toString().toLowerCase().includes('not logged in');
   } catch {
-    return false;
+    cachedLoggedIn = false;
+  }
+  return cachedLoggedIn;
+}
+
+/** Reset the cached login status — used in tests. */
+export function resetCursorLoginCache(): void {
+  cachedLoggedIn = null;
+}
+
+/**
+ * On Windows, create a bash-compatible shim so MINGW/Git Bash users can run
+ * `agent` without the full path. The shim forwards to the resolved agent.cmd.
+ *
+ * Returns the shim path if created, or null if not needed / not Windows.
+ */
+export function ensureBashShim(): { created: boolean; path: string } | null {
+  if (!IS_WINDOWS) return null;
+
+  const bin = resolveAgentBin();
+  if (bin === 'agent') return null; // couldn't resolve the real binary
+
+  // Check if `agent` is already resolvable by bash (unlikely for .cmd, but possible with a shim)
+  try {
+    execSync('which agent', { stdio: 'ignore' });
+    return { created: false, path: bin };
+  } catch {
+    // not resolvable — create the shim
+  }
+
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? os.homedir();
+  const shimDir = path.join(home, 'bin');
+  const shimPath = path.join(shimDir, 'agent');
+
+  try {
+    if (!fs.existsSync(shimDir)) {
+      fs.mkdirSync(shimDir, { recursive: true });
+    }
+    const agentPath = bashPath(bin);
+    fs.writeFileSync(shimPath, `#!/bin/bash\nexec "${agentPath}" "$@"\n`, { mode: 0o755 });
+    return { created: true, path: shimPath };
+  } catch {
+    return null;
   }
 }

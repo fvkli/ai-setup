@@ -3,7 +3,12 @@ import select from '@inquirer/select';
 import confirm from '@inquirer/confirm';
 import { writeConfigFile, DEFAULT_MODELS } from '../llm/config.js';
 import type { ProviderType, LLMConfig } from '../llm/types.js';
-import { isCursorAgentAvailable, isCursorLoggedIn } from '../llm/cursor-acp.js';
+import {
+  isCursorAgentAvailable,
+  isCursorLoggedIn,
+  listCursorModels,
+  ensureBashShim,
+} from '../llm/cursor-acp.js';
 import { isClaudeCliAvailable, isClaudeCliLoggedIn } from '../llm/claude-cli.js';
 import { isOpenCodeAvailable } from '../llm/opencode.js';
 import { promptInput } from '../utils/prompt.js';
@@ -121,8 +126,28 @@ export async function runInteractiveProviderSetup(options?: {
         const proceed = await confirm({ message: 'Continue anyway?' });
         if (!proceed) throw new Error('__exit__');
       }
-      config.model =
-        (await promptInput(`Model (default: ${DEFAULT_MODELS.cursor}):`)) || DEFAULT_MODELS.cursor;
+      let cursorModels: string[] = [];
+      try {
+        cursorModels = await listCursorModels();
+      } catch {
+        // listing unavailable — fall through to free-text
+      }
+      if (cursorModels.length > 0) {
+        const defaultIdx = cursorModels.indexOf(DEFAULT_MODELS.cursor);
+        const choices = cursorModels.map((m, i) => ({
+          name: i === defaultIdx ? `${m} (default)` : m,
+          value: m,
+        }));
+        config.model = await select<string>({
+          message: 'Select model',
+          choices,
+          default: DEFAULT_MODELS.cursor,
+        });
+      } else {
+        config.model =
+          (await promptInput(`Model (default: ${DEFAULT_MODELS.cursor}):`)) ||
+          DEFAULT_MODELS.cursor;
+      }
       break;
     }
     case 'anthropic': {
@@ -183,5 +208,18 @@ export async function runInteractiveProviderSetup(options?: {
   }
 
   writeConfigFile(config);
+
+  if (provider === 'cursor') {
+    const shim = ensureBashShim();
+    if (shim?.created) {
+      console.log(
+        chalk.dim('\n  Created bash shim at ') +
+          chalk.hex('#83D1EB')(shim.path) +
+          chalk.dim(' so `agent` works in Git Bash / MINGW.'),
+      );
+      console.log(chalk.dim('  Restart your terminal for the change to take effect.\n'));
+    }
+  }
+
   return config;
 }
