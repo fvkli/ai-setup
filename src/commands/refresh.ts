@@ -26,6 +26,7 @@ import { recordScore } from '../scoring/history.js';
 import { CALIBER_DIR, REFRESH_LAST_ERROR_FILE } from '../constants.js';
 import { discoverConfigDirs } from '../lib/config-discovery.js';
 import { scanLargeFiles } from '../fingerprint/large-file-scan.js';
+import { filterIgnoredWarnings } from '../fingerprint/large-file-filter.js';
 import { printLargeFileWarnings } from '../fingerprint/large-file-warn.js';
 
 function writeRefreshError(error: unknown): void {
@@ -162,7 +163,9 @@ async function refreshDir(
   const learnedSection = readLearnedSection();
   const fingerprint = await collectFingerprint(absDir);
 
-  printLargeFileWarnings(scanLargeFiles(absDir), { spinner: spinner ?? undefined });
+  printLargeFileWarnings(filterIgnoredWarnings(scanLargeFiles(absDir), absDir), {
+    spinner: spinner ?? undefined,
+  });
 
   const existingDocs = fingerprint.existingConfigs;
   const projectContext = {
