@@ -88,20 +88,20 @@ describe('caliber-check-sync.sh', () => {
       path.join(tmpDir, '.git', 'hooks', 'pre-commit'),
       '#!/bin/sh\ncaliber refresh\n',
     );
-    const { status } = runScript(tmpDir);
+    const { status } = runScript(tmpDir, { CLAUDE_PROJECT_DIR: tmpDir });
     expect(status).toBe(0);
   });
 
   it('outputs block decision when caliber is not set up and flag is not set', () => {
-    const { stdout } = runScript(tmpDir);
+    const { stdout } = runScript(tmpDir, { CLAUDE_PROJECT_DIR: tmpDir });
     expect(stdout).toContain('"decision":"block"');
   });
 
   it('exits 0 on second run (flag file prevents repeat prompt)', () => {
     // First run sets the flag
-    runScript(tmpDir);
+    runScript(tmpDir, { CLAUDE_PROJECT_DIR: tmpDir });
     // Second run should exit 0 silently
-    const { status, stdout } = runScript(tmpDir);
+    const { status, stdout } = runScript(tmpDir, { CLAUDE_PROJECT_DIR: tmpDir });
     expect(status).toBe(0);
     expect(stdout).not.toContain('"decision":"block"');
   });
