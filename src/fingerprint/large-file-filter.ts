@@ -20,15 +20,16 @@ function getGitIgnoredPaths(
 ): Set<string> | null {
   if (relativePaths.length === 0) return new Set();
   try {
-    const result = exec('git', ['check-ignore', ...relativePaths], {
+    const result = exec('git', ['check-ignore', '--stdin'], {
       cwd: dir,
       encoding: 'utf-8',
+      input: relativePaths.join('\n'),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     return new Set(
       (result as string)
         .split('\n')
-        .map((l) => l.trim())
+        .map((l) => toForwardSlash(l.trim()))
         .filter(Boolean),
     );
   } catch (err: unknown) {

@@ -206,8 +206,8 @@ describe('filterIgnoredWarnings', () => {
     expect(result).toHaveLength(0);
     expect(execFileSync).toHaveBeenCalledWith(
       'git',
-      expect.arrayContaining(['check-ignore', 'deep/nested/dir/big.bin']),
-      expect.any(Object),
+      ['check-ignore', '--stdin'],
+      expect.objectContaining({ input: 'deep/nested/dir/big.bin' }),
     );
   });
 
