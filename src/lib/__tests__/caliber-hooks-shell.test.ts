@@ -46,13 +46,18 @@ describe('caliber-check-sync.sh', () => {
     }
   });
 
-  it('exits 0 silently when the directory is not a git repo', () => {
+  it('exits 0 silently when the project directory is not a git repo', () => {
     // Common case: a `.claude/` directory was generated in a non-git directory
     // (scratch dir, model archive, etc.). Caliber refresh won't run there
     // anyway, so the nudge is just noise — must not fire.
+    // Set $CLAUDE_PROJECT_DIR explicitly: that's how Claude Code passes the
+    // project root into hooks, and the script now anchors its git check on
+    // it (post-2026-05-19 fix for the nested-git-in-non-git-project bug).
     const nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'caliber-nogit-'));
     try {
-      const { status, stdout } = runScript(nonGitDir);
+      const { status, stdout } = runScript(nonGitDir, {
+        CLAUDE_PROJECT_DIR: nonGitDir,
+      });
       expect(status).toBe(0);
       expect(stdout).not.toContain('"decision":"block"');
     } finally {
@@ -99,5 +104,55 @@ describe('caliber-check-sync.sh', () => {
     const { status, stdout } = runScript(tmpDir);
     expect(status).toBe(0);
     expect(stdout).not.toContain('"decision":"block"');
+  });
+
+  it('exits 0 when $PWD is a nested git repo but $CLAUDE_PROJECT_DIR is non-git', () => {
+    // Real-world scenario observed 2026-05-19: a backup_models/ scratch
+    // directory contains its own .claude/ but is itself NOT a git repo;
+    // however a Mythic-RDT/ subdirectory inside it IS a git repo. When
+    // Claude Code starts in the subdir, $PWD points at the nested git
+    // while $CLAUDE_PROJECT_DIR still points at the non-git owner of
+    // the .claude/. Pre-fix, `git rev-parse --git-dir` from $PWD
+    // wrongly succeeded against the nested .git and fired the nudge
+    // for a project Caliber has no business managing.
+    //
+    // The post-fix script anchors the git check on $CLAUDE_PROJECT_DIR
+    // (with a script-relative fallback for shell-test invocations).
+    const owner = fs.mkdtempSync(path.join(os.tmpdir(), 'caliber-owner-'));
+    const nested = path.join(owner, 'nested');
+    fs.mkdirSync(nested);
+    spawnSync('git', ['init', '-q'], { cwd: nested });
+    try {
+      const result = spawnSync('sh', [SCRIPT], {
+        cwd: nested, // $PWD = nested git repo
+        env: { ...process.env, CLAUDE_PROJECT_DIR: owner }, // non-git project root
+        encoding: 'utf-8',
+      });
+      const stdout = (result.stdout ?? '') + (result.stderr ?? '');
+      expect(result.status).toBe(0);
+      expect(stdout).not.toContain('"decision":"block"');
+    } finally {
+      fs.rmSync(owner, { recursive: true, force: true });
+    }
+  });
+
+  it('honors $CLAUDE_PROJECT_DIR when set, even when $PWD is unrelated', () => {
+    // Positive case: $CLAUDE_PROJECT_DIR points at a real git project
+    // whose pre-commit lacks caliber → nudge should fire. Confirms
+    // the new anchor reads the right directory's pre-commit, not
+    // whatever pre-commit happens to live under $PWD.
+    const otherPwd = fs.mkdtempSync(path.join(os.tmpdir(), 'caliber-other-pwd-'));
+    try {
+      const result = spawnSync('sh', [SCRIPT], {
+        cwd: otherPwd,
+        env: { ...process.env, CLAUDE_PROJECT_DIR: tmpDir },
+        encoding: 'utf-8',
+      });
+      const stdout = (result.stdout ?? '') + (result.stderr ?? '');
+      expect(result.status).toBe(0);
+      expect(stdout).toContain('"decision":"block"');
+    } finally {
+      fs.rmSync(otherPwd, { recursive: true, force: true });
+    }
   });
 });
